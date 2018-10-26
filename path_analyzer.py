@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 import sys
 import argparse
 from jnpr.junos import Device
@@ -74,35 +76,68 @@ def main():
     find_path(args.device, args.destination)
 
 def find_path(device, destination):
-    path = []
-    results = {'hop 0': get_egress_details(device, destination)}
-    print '\n\n********** FINAL RESULTS ***********\n\n'
+    hop  = 0
+    results = {}
+    current_device = device
+    destination = destination + '/32'
+    last_hop = False
+    # Hard coded for now until we detect device being final hop
+    while last_hop == False:
+        print 'Processing device {} as hop {}'.format(current_device, hop)
+        dev = Device(host=current_device)
+        dev.open()
+        if hop != 0:
+            ingress_details = get_ingress_details(dev, device)
+        egress_details = get_egress_details(dev, current_device, destination)
+        dev.close()
+        if egress_details == None:
+            last_hop = True
+        results[hop] = {current_device: egress_details}
+        if last_hop != True:
+            current_device = egress_details['next_device']
+        hop = hop + 1
+        print '\n\n'
+        
+    print '\n\n********** PATH RESULTS ***********\n\n'
     pp(results)
 
-def get_egress_details(device, destination):
+def get_egress_details(dev, device, destination):
     #try:
     print 'Finding path to {} from {}'.format(destination, device)
     egress_interfaces = []
-    dev = Device(host=device)
-    dev.open()
+    #dev = Device(host=device)
+    #dev.open()
     routes = RouteTable(dev)
-    routes.get(destination, table='inet.0', protocol='rsvp')
+    routes.get(destination, table='inet.0')
     for route in routes:
-        for nh in route.nh.keys():
-            if route.nh[nh].selected == True:
-                print ' Found egress interface {} on {}'.format(nh, device)
-                if 'ae' in nh:
-                    for i in get_lag_members(dev, nh):
+        for nexthop in route.nh:
+            if nexthop.selected == True:
+                print ' Found egress interface {} on {}'.format(nexthop.key, device)
+                if 'ae' in nexthop.key:
+                    interfaces =  get_lag_members(dev, nexthop.key) 
+                    for i in interfaces:
                         egress_interfaces.append(i)
+                elif nexthop.key == 'lo0.0':
+                    egress_interfaces = None
+                    print 'Last hop!'
                 else:
-                    egress_interfaces.append(nh)
+                    egress_interfaces.append(nexthop.key)
+                break
     print 'Egress interface(s) on {} is {}'.format(device, egress_interfaces)
-    remote_device_details = get_remote_device(dev, egress_interfaces)
-    return {'device': device, 'egress_interfaces': remote_device_details }
+    if egress_interfaces != None:
+        remote_device_details, next_device  = get_remote_device(dev, egress_interfaces)
+        next_device = fix_hostname(remote_device_details[0][egress_interfaces[0]]['remote_device'])
+        return {'next_device': next_device, 'egress_interfaces': remote_device_details}
+    else:
+        return None
 
     #except:
     #    print('Unable to connect to {}'.format(device))
     #    sys.exit()
+
+def get_ingress_details(dev, device):
+    print 'Grabbbing ingress details from {}'.format(device)
+    pass
 
 def get_remote_device(dev, interfaces):
     egress_interfaces = []
@@ -115,7 +150,7 @@ def get_remote_device(dev, interfaces):
             if iface.key in interfaces:
                 print '{} is a member of {} and is connected to {}:{}'.format(iface.key, iface.local_parent, iface.remote_sysname, iface.remote_port_id)
                 egress_interfaces.append({i: {'parent_interface': iface.local_parent, 'remote_device': iface.remote_sysname, 'remote_interface': iface.remote_port_id}})
-    return egress_interfaces
+    return egress_interfaces, iface.remote_sysname
 
 def get_lag_members(dev, interface):
     interfaces = []
@@ -129,8 +164,12 @@ def get_lag_members(dev, interface):
     return interfaces
 
 def fix_hostname(hostname):
-    pass
-
+    if hostname.startswith('re'):
+        hostname = hostname[4:]
+        return hostname
+    else:
+        return hostname
+    
 
 def cli_run():
     parser = argparse.ArgumentParser(description='Determine network path taken based on starting device and destination IP and gather link details.')
